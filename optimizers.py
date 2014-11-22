@@ -14,6 +14,7 @@ from linesearch import backtracking_linesearch
 
 theano.config.compute_test_value = 'ignore'
 
+#This is a hack, to allow classes to continue working correctly after reloading a module
 def arsuper(c, instance):
     instance.__class__ = globals()[instance.__class__.__name__]
     return super(c, instance)
@@ -118,6 +119,9 @@ class Optimizer(object):
     def status(self):
         return {param : self.__dict__[param] for param in self.monitors}
 
+    def get_value(self):
+        return self.value
+
     def grad(self, x, **kwargs):
         return self.problem.grad(x, record=self.record, **kwargs)
 
@@ -140,8 +144,9 @@ class Optimizer(object):
             args['value'] = self.value
         return self.record.snapshot(**args)
 
-    #TODO: better management of optimization tolerance etc., right now hard to change
     #this method isn't supposed to be called directly by the user
+    #instead they should 'start' or 'resume'
+    #TODO: better management of optimization tolerance etc., right now hard to change
     def optimize(self, tolerance=1e-3, testgap=4, epoch_gap=100, max_epochs=50000):
         try:
             self.record.start_timer()
@@ -187,10 +192,9 @@ class GradientOptimizer(Optimizer):
     #at the current point.
     def step(self):
         arsuper(GradientOptimizer, self).step()
-        g = -self.grad(self.value,size=self.minibatch_size)
+        g = -self.grad(self.get_value(),size=self.minibatch_size)
         self.value += g * self.learning_rate
         return [g.dot(g)]
-
 
 class MomentumOptimizer(Optimizer):
 
@@ -289,10 +293,12 @@ class HFOptimizer_MultiL(Optimizer):
         preconditioner = (grad2 + 0.01*grad2.mean()*np.ones_like(grad2))**(0.75)
 
         x_best, i_best, m_best, x_last, m_last, obj_best, logs = self.CGstep(
-            lambda v : self.Gv(self.value, v), -self.grad(self.value), self.x,
-            lambda d : self.objective(self.value+d), 
-            [ multiplier  * self.current_lambda for multiplier in self.lambda_multipliers],
-            preconditioner
+            apply_A=lambda v : self.Gv(self.value, v), 
+            g=-self.grad(self.value), 
+            x0=self.x,
+            objective=lambda d : self.objective(self.value+d), 
+            lambdas=[ multiplier  * self.current_lambda for multiplier in self.lambda_multipliers],
+            preconditioner=preconditioner
         )
 
         self.min_iters = i_best
