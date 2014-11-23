@@ -129,11 +129,13 @@ class TheanoOptimizationProblem(OptimizationProblem):
 
     def make_minibatch(self,size=None, reuse=False, name=None):
         #TODO: get rid of the x[indices] call for performance
-        if size is None:
+        if not self.inputs:
+            return []
+        n = len(self.inputs[0])
+        if size is None or size == n:
             return self.inputs
         if reuse and name in self.minibatches:
             return self.minibatches[name]
-        n = len(self.inputs[0])
         indices = random.sample(xrange(n), size)
         result = [ x[indices] for x in self.inputs ]
         self.minibatches[name]=result
@@ -142,16 +144,18 @@ class TheanoOptimizationProblem(OptimizationProblem):
     def execute(self, f, xs, record=None, pack=True, unpacks=None, **kwargs):
         if unpacks is None:
             unpacks = [ True for x in xs ] 
+        if xs and len(xs[0].shape) > 1 and xs[0].shape[0] > 1:
+            kwargs['size'] = xs[0].shape[0]
         inputs = self.make_minibatch(**kwargs)
         size = 1 if not inputs else len(inputs[0])
         if record is not None:
             record.pay_cost(size * f['cost'], f.get('name',None))
         args = []
         for x, unpack in zip(xs, unpacks):
-            if unpack:
-                args.extend(self.unpack_values(x))
-            else:
-                args.append(x)
+            if len(x.shape) == 1:
+                x = np.repeat(x.reshape(1, -1), size, axis=0) 
+            next_arg = self.unpack_values(x) if unpack else x
+            args.extend(next_arg)
         result =  f['fn'](*(args + inputs))
         return self.pack_values(result) if pack else result
 
@@ -168,10 +172,23 @@ class TheanoOptimizationProblem(OptimizationProblem):
         return self.execute(self.objective_f, [x], pack=False, **kwargs)
 
     def unpack_values(self, value_vector):
-        return [ value_vector[position:position+size].reshape(shape) for shape,size,position in zip(self.param_shapes, self.param_sizes, self.param_positions) ]
+        stacked_values = len(value_vector.shape) > 1
+        if stacked_values:
+            num_values = value_vector.shape[0]
+        return [ value_vector[:, position:position+size].reshape((num_values,)+shape) 
+                if stacked_values 
+                else value_vector[position:position+size].reshape((1,)+ shape)
+                for shape,size,position 
+                in zip(self.param_shapes, self.param_sizes, self.param_positions) ]
 
     def pack_values(self, value_list):
-        return np.concatenate([value.flatten() for value in value_list])
+        stacked_values = len(value_list[0].shape) > len(self.param_shapes[0])
+        if stacked_values:
+            num_values = value_list[0].shape[0]
+            return np.concatenate([value.reshape(num_values, -1) for value in value_list], axis=1)
+        else:
+            return np.concatenate([value.flatten() for value in value_list])
+
 
 class Quadratic(TheanoOptimizationProblem):
 
@@ -262,6 +279,7 @@ class Quadratic(TheanoOptimizationProblem):
 class LogisticRegressionProblem(PredictionProblem):
 
     def __init__(self, features, targets, name="LogisticRegression", **kwargs):
+
         self.M = len(features)
         self.N = len(features[0])
         self.K = max(targets)+1
@@ -271,16 +289,27 @@ class LogisticRegressionProblem(PredictionProblem):
         
         symbolic_features = T.matrix('features')
         symbolic_targets = T.matrix('targets')
-        symbolic_bias = T.vector('bias')
-        symbolic_weights = T.matrix('weights')
+        symbolic_bias = T.matrix('bias')
 
-        prediction = T.nnet.softmax(symbolic_bias+T.dot(symbolic_features, symbolic_weights))
+        symbolic_weights = T.tensor3('weights')
+
+        prediction = T.nnet.softmax(symbolic_bias+T.batched_dot(symbolic_features, symbolic_weights))
         objective = T.nnet.categorical_crossentropy(prediction, symbolic_targets)
 
         def onehot(k,K):
             result = np.zeros(K)
             result[k] = 1.0
             return result
+
+#for testing only
+        M = 100
+        K = self.K
+        N = self.N
+
+        test_features = np.random.randn(M,N)
+        test_targets = np.array([onehot(np.random.randint(0,K),K) for i in range(M)])
+        test_weights = np.random.randn(M,N,K)
+        test_bias = np.random.randn(M,K)
 
         inputs = [normalized_features, [onehot(target, self.K) for target in targets]]
         initial_params = [ np.zeros(self.K), np.random.randn(self.N,self.K) / np.sqrt(self.N) ]
